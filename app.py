@@ -1,156 +1,26 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash
+from flask import Flask, request, jsonify
 import sqlite3
-from functools import wraps
-from werkzeug.security import generate_password_hash
-from werkzeug.security import check_password_hash
-import time
- 
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_cors import CORS
 
 app = Flask(__name__)
-app.secret_key = 'secret_key'  # Chave secraeta para gerenciar sessões
+CORS(app)  # Permitir requisições do front-end React
+app.secret_key = 'secret_key'  # Pode ser removido se não for usar sessões
 
-# Função para conectar ao banco de dados
+# Conexão com o banco de dados
 def get_db_connection():
     conn = sqlite3.connect('biblioteca.db')
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON;')
     return conn
 
-# Decorador para proteger rotas
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
-            flash('Você precisa estar logado para acessar esta página.')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Página de login
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    conn = get_db_connection()
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-
-        user = conn.execute('SELECT * FROM Usuarios WHERE username = ?', (username,)).fetchone()
-        if user and user['password'] == password:
-            session['logged_in'] = True
-            return redirect(url_for('index'))
-        else:
-            flash('Credenciais inválidas. Tente novamente.')
-            return redirect(url_for('register'))
-
-    conn.close()
-    return render_template('login.html')
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    conn = get_db_connection()
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        try:
-            conn.execute('INSERT INTO Usuarios (username, password) VALUES (?, ?)', (username, password))
-            conn.commit()
-            flash('Usuário criado com sucesso!')
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
-            flash('Nome de usuário já existe. Escolha outro.')
-            return redirect(url_for('register'))
-    
-    conn.close()
-    return render_template('register.html')
-
-# Página de logout
-@app.route('/logout')
-@login_required
-def logout():
-    session.pop('logged_in', None)
-    flash('Você foi deslogado com sucesso.')
-    return redirect(url_for('login'))
-
-# Página inicial
-@app.route('/')
-@login_required
-def index():
-    return render_template('index.html')
-
-# Exibir e adicionar gêneros
-@app.route('/generos', methods=['GET', 'POST'])
-@login_required
-def generos():
-    conn = get_db_connection()
-    if request.method == 'POST':
-        nome = request.form['nome']
-        conn.execute('INSERT INTO Generos (nome) VALUES (?)', (nome,))
-        conn.commit()
-        return redirect(url_for('generos'))
-
-    generos = conn.execute('SELECT * FROM Generos').fetchall()
-    conn.close()
-    return render_template('generos.html', generos=generos)
-
-# Exibir e adicionar livros
-@app.route('/livros', methods=['GET', 'POST'])
-@login_required
-def livros():
-    conn = get_db_connection()
-    if request.method == 'POST':
-        titulo = request.form['titulo']
-        autor = request.form['autor']
-        genero_id = request.form['genero_id']
-        print(genero_id)
-        print('------------')
-        conn.execute('INSERT INTO Livros (titulo, autor, genero_id) VALUES (?, ?, ?)', (titulo, autor, genero_id))
-        conn.commit()
-        return redirect(url_for('livros'))
-
-    livros = conn.execute('''
-    SELECT Livros.id, Livros.titulo, Livros.autor, Generos.nome AS genero 
-    FROM Livros 
-    JOIN Generos ON Livros.genero_id = Generos.id
-    ''').fetchall()
-    generos = conn.execute('SELECT * FROM Generos').fetchall()
-    conn.close()
-    return render_template('livros.html', livros=livros, generos=generos)
-
-# Deletar livro
-@app.route('/delete_livro/<int:id>')
-@login_required
-def delete_livro(id):
-    conn = get_db_connection()
-    conn.execute('DELETE FROM Livros WHERE id = ?', (id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('livros'))
-
-# Deletar gênero
-@app.route('/delete_genero/<int:id>')
-@login_required
-def delete_genero(id):
-    conn = get_db_connection()
-    try:
-        conn.execute('DELETE FROM Generos WHERE id = ?', (id,))
-        conn.commit()
-        flash('Gênero deletado com sucesso.')
-    except sqlite3.IntegrityError:
-        flash('Não é possível excluir o gênero porque ele está sendo usado por um livro.')
-    finally:
-        conn.close()
-    return redirect(url_for('generos'))
-
-
-
-if __name__ == '__main__':
-    # Configurações de banco de dados (criação das tabelas)
+# Criar tabelas no banco de dados
+def init_db():
     conn = get_db_connection()
     conn.execute('''
     CREATE TABLE IF NOT EXISTS Generos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL
+        nome TEXT NOT NULL UNIQUE
     )
     ''')
     conn.execute('''
@@ -169,7 +39,133 @@ if __name__ == '__main__':
         password TEXT NOT NULL
     )
     ''')
+    conn.commit()
     conn.close()
 
-    # Iniciar o servidor Flask
+# Registro de usuário
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+
+    if not username or not password:
+        return jsonify({"message": "Usuário e senha são obrigatórios."}), 400
+
+    hashed_password = generate_password_hash(password)
+
+    conn = get_db_connection()
+    try:
+        conn.execute('INSERT INTO Usuarios (username, password) VALUES (?, ?)', (username, hashed_password))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return jsonify({"message": "Nome de usuário já existe."}), 400
+    finally:
+        conn.close()
+
+    return jsonify({"message": "Usuário registrado com sucesso."}), 201
+
+# Login
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM Usuarios WHERE username = ?', (username,)).fetchone()
+    conn.close()
+
+    if user:
+        if check_password_hash(user['password'], password):  # Usa hash para segurança
+            return jsonify({"message": "Login realizado com sucesso."}), 200
+        else:
+            return jsonify({"message": "Senha incorreta."}), 401
+    return jsonify({"message": "Usuário não encontrado."}), 401
+
+
+# Listar e adicionar gêneros
+@app.route('/generos', methods=['GET', 'POST'])
+def generos():
+    conn = get_db_connection()
+
+    if request.method == 'POST':
+        data = request.json
+        nome = data.get('nome')
+
+        if not nome:
+            return jsonify({"message": "Nome do gênero é obrigatório"}), 400
+
+        try:
+            conn.execute('INSERT INTO Generos (nome) VALUES (?)', (nome,))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"message": "Gênero já existe."}), 400
+        finally:
+            conn.close()
+
+        return jsonify({"message": "Gênero adicionado com sucesso"}), 201
+
+    generos = conn.execute('SELECT * FROM Generos').fetchall()
+    conn.close()
+    return jsonify([{"id": g["id"], "nome": g["nome"]} for g in generos])
+
+# Deletar gênero
+@app.route('/delete_genero/<int:id>', methods=['DELETE'])
+def delete_genero(id):
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM Generos WHERE id = ?', (id,))
+        conn.commit()
+        return jsonify({"message": "Gênero deletado com sucesso"}), 200
+    except sqlite3.IntegrityError:
+        return jsonify({"message": "Não é possível excluir o gênero porque ele está sendo usado"}), 400
+    finally:
+        conn.close()
+
+# Listar e adicionar livros
+@app.route('/livros', methods=['GET', 'POST'])
+def livros():
+    conn = get_db_connection()
+
+    if request.method == 'POST':
+        data = request.json
+        titulo = data.get('titulo')
+        autor = data.get('autor')
+        genero_id = data.get('genero_id')
+
+        if not titulo or not autor or not genero_id:
+            return jsonify({"message": "Todos os campos são obrigatórios"}), 400
+
+        try:
+            conn.execute('INSERT INTO Livros (titulo, autor, genero_id) VALUES (?, ?, ?)', 
+                         (titulo, autor, genero_id))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({"message": "Erro ao adicionar livro"}), 400
+        finally:
+            conn.close()
+
+        return jsonify({"message": "Livro adicionado com sucesso"}), 201
+
+    livros = conn.execute('''
+    SELECT Livros.id, Livros.titulo, Livros.autor, Generos.nome AS genero 
+    FROM Livros 
+    JOIN Generos ON Livros.genero_id = Generos.id
+    ''').fetchall()
+    conn.close()
+    return jsonify([{"id": l["id"], "titulo": l["titulo"], "autor": l["autor"], "genero": l["genero"]} for l in livros])
+
+# Deletar livro
+@app.route('/delete_livro/<int:id>', methods=['DELETE'])
+def delete_livro(id):
+    print(id)
+    conn = get_db_connection()
+    conn.execute('DELETE FROM Livros WHERE id = ?', (id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"message": "Livro deletado com sucesso"}), 200
+
+if __name__ == '__main__':
+    init_db()  # Cria as tabelas se não existirem
     app.run(debug=True)
